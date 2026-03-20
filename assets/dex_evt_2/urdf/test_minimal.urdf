@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<robot name="tiangong2dex_minimal">
+  <!-- 基础连杆 -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="0.2 0.2 0.1"/>  <!-- 20cm×20cm×10cm的立方体 -->
+      </geometry>
+      <material name="gray">
+        <color rgba="0.5 0.5 0.5 1.0"/>  <!-- 灰色 -->
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.2 0.2 0.1"/>
+      </geometry>
+    </collision>
+  </link>
+  <!-- 无关节，仅基础连杆 -->
+</robot>
+

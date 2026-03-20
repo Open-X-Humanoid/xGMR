@@ -22,25 +22,12 @@ if __name__ == "__main__":
     )
     
     parser.add_argument(
-        "--format",
-        choices=["lafan1", "nokov"],
-        default="lafan1",
-    )
-    
-    parser.add_argument(
-        "--loop",
-        default=False,
-        action="store_true",
-        help="Loop the motion.",
-    )
-    
-    parser.add_argument(
         "--robot",
-        choices=["unitree_g1", "unitree_g1_with_hands", "booster_t1", "stanford_toddy", "fourier_n1", "engineai_pm01", "pal_talos"],
+        choices=["unitree_g1", "unitree_g1_with_hands", "booster_t1", "stanford_toddy", "fourier_n1", 
+            "engineai_pm01","dex0902","dex_v3", "dex_evt", "tienkung2", "tienkung2_lite", "tienkung2_plus", "dex_evt2"],
         default="unitree_g1",
     )
-    
-    
+        
     parser.add_argument(
         "--record_video",
         action="store_true",
@@ -65,41 +52,76 @@ if __name__ == "__main__":
         help="Path to save the robot motion.",
     )
     
+    def str2bool(v):
+        return v.lower() in ("true", "1", "yes")
+
+    parser.add_argument(
+        "--add_collision_avoidance",
+        type=str2bool,
+        default=False,
+    )
+
+    parser.add_argument(
+        "--add_offset_human_data",
+        type=str2bool,
+        default=False,
+        
+    )
+
+    parser.add_argument(
+        "--format",
+        type=str,
+        default="",
+    )
+
     parser.add_argument(
         "--motion_fps",
-        default=30,
         type=int,
+        default=100,
     )
-    
+
+    parser.add_argument(
+        "--object_mesh_file",
+        type=str,
+        default="assets/dex_evt/meshes_new/box_obstacle_xup.stl",
+        
+    )
+
+    parser.add_argument(
+        "--task_type",
+        type=str,
+        default="robot_only",
+        
+    )
+
     args = parser.parse_args()
     
+
     if args.save_path is not None:
+        args.save_path = args.save_path[:-4] + args.robot + args.save_path[-4:]
         save_dir = os.path.dirname(args.save_path)
         if save_dir:  # Only create directory if it's not empty
             os.makedirs(save_dir, exist_ok=True)
         qpos_list = []
+        dof_vels = []
+        end_poses = []
 
-    
-    # Load SMPLX trajectory
+    # Initialize the retargeting system
     lafan1_data_frames, actual_human_height = load_bvh_file(args.bvh_file, format=args.format)
     
-    
-    # Initialize the retargeting system
     retargeter = GMR(
-        src_human=f"bvh_{args.format}",
+        src_human="bvh",
         tgt_robot=args.robot,
+        format=args.format,
         actual_human_height=actual_human_height,
+        use_collision_avoidance=args.add_collision_avoidance,
     )
-
-    motion_fps = args.motion_fps
     
     robot_motion_viewer = RobotMotionViewer(robot_type=args.robot,
-                                            motion_fps=motion_fps,
+                                            motion_fps=args.motion_fps,
                                             transparent_robot=0,
                                             record_video=args.record_video,
                                             video_path=args.video_path,
-                                            # video_width=2080,
-                                            # video_height=1170
                                             )
     
     # FPS measurement variables
@@ -107,17 +129,16 @@ if __name__ == "__main__":
     fps_start_time = time.time()
     fps_display_interval = 2.0  # Display FPS every 2 seconds
     
-    print(f"mocap_frame_rate: {motion_fps}")
+    print(f"mocap_frame_rate: {args.motion_fps}")
     
     # Create tqdm progress bar for the total number of frames
     pbar = tqdm(total=len(lafan1_data_frames), desc="Retargeting")
     
     # Start the viewer
     i = 0
-    
+    pre_dof_pos = None
 
-
-    while True:
+    while i < len(lafan1_data_frames):
         
         # FPS measurement
         fps_counter += 1
@@ -135,9 +156,16 @@ if __name__ == "__main__":
         smplx_data = lafan1_data_frames[i]
 
         # retarget
-        qpos = retargeter.retarget(smplx_data)
-        
-
+        qpos = retargeter.retarget(smplx_data, args.add_offset_human_data)
+        if i > 1: # 前几帧可能有较大抖动，导致速度过大，先不保存
+            qpos_list.append(qpos)
+            end_poses.append(end_pos.tolist())
+            dof_vels.append(dof_vel.tolist())
+        else: 
+            retargeter.ground_offset = None
+            retargeter.configuration.data.qpos[:3] == lafan1_data_frames[i]["Hips"][0].copy()
+            retargeter.configuration.data.qpos[3:7] == lafan1_data_frames[i]["Hips"][1].copy()
+            qpos = retargeter.configuration.data.qpos.copy()
         # visualize
         robot_motion_viewer.step(
             root_pos=qpos[:3],
@@ -145,21 +173,18 @@ if __name__ == "__main__":
             dof_pos=qpos[7:],
             human_motion_data=retargeter.scaled_human_data,
             rate_limit=args.rate_limit,
-            follow_camera=True,
-            # human_pos_offset=np.array([0.0, 0.0, 0.0])
         )
-
-        if args.loop:
-            i = (i + 1) % len(lafan1_data_frames)
+        end_pos = robot_motion_viewer.get_info()
+        dof_pos = qpos[7:]
+        if pre_dof_pos is None:
+            dof_vel = np.zeros(dof_pos.shape)
+            pre_dof_pos = qpos.copy()
         else:
-            i += 1
-            if i >= len(lafan1_data_frames):
-                break
-   
+            dof_vel = (qpos - pre_dof_pos) / (1 / args.motion_fps)
+
+        i += 1
         
-        if args.save_path is not None:
-            qpos_list.append(qpos)
-    
+
     if args.save_path is not None:
         import pickle
         root_pos = np.array([qpos[:3] for qpos in qpos_list])
@@ -170,15 +195,21 @@ if __name__ == "__main__":
         body_names = None
         
         motion_data = {
-            "fps": motion_fps,
+            "fps": args.motion_fps,
             "root_pos": root_pos,
             "root_rot": root_rot,
             "dof_pos": dof_pos,
             "local_body_pos": local_body_pos,
             "link_body_list": body_names,
         }
-        with open(args.save_path, "wb") as f:
-            pickle.dump(motion_data, f)
+        
+        if args.save_path[-3:] == "pkl":
+            with open(args.save_path, "wb") as f:
+                pickle.dump(motion_data, f)
+        elif args.save_path[-3:] == "npz":
+            motion_data["dof_vel"] = np.array(dof_vels)
+            motion_data["endpoint_pos_BCS"] = np.array(end_poses)
+            np.savez(args.save_path, **motion_data)
         print(f"Saved to {args.save_path}")
 
     # Close progress bar

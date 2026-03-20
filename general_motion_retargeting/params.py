@@ -20,9 +20,18 @@ ROBOT_XML_DICT = {
     "berkeley_humanoid_lite": ASSET_ROOT / "berkeley_humanoid_lite" / "bhl_scene.xml",
     "booster_k1": ASSET_ROOT / "booster_k1" / "K1_serial.xml",
     "pnd_adam_lite": ASSET_ROOT / "pnd_adam_lite" / "scene.xml",
-    "tienkung": ASSET_ROOT / "tienkung" / "mjcf" / "tienkung.xml",
-    "pal_talos": ASSET_ROOT / "pal_talos" / "talos.xml",
-    "fourier_gr3": ASSET_ROOT / "fourier_gr3v2_1_1" / "mjcf" / "gr3v2_1_1_dummy_hand.xml",
+    "tienkung2": ASSET_ROOT / "tienkung2_pro" / "urdf" / "tiangong2_EVT_V2.xml",
+    "tienkung2_lite": ASSET_ROOT / "tienkung2_lite" / "urdf" / "tiangong2_Lite.xml",
+    "tienkung2_plus": ASSET_ROOT / "tienkung2_plus" / "urdf" / "tiangong2_EVT_V9_urdf.xml",
+    "dex0902": ASSET_ROOT / "dex0902" / "urdf" /"dex0902.xml",
+    "dex_evt2": ASSET_ROOT / "dex_evt_2" / "urdf" /"dex_evt.xml",
+}
+
+ROBOT_URDF_DICT = {
+    "dex_evt2": ASSET_ROOT / "dex_evt_2" / "urdf" /"tiangong2dex_no_contact.urdf",
+    "tienkung2": ASSET_ROOT / "tienkung2_pro" / "urdf" / "tiangong2_EVT_V2.urdf",
+    "tienkung2_plus": ASSET_ROOT / "tienkung2_plus" / "urdf" / "tiangong2_EVT_V9_urdf.urdf",
+    "tienkung2_lite": ASSET_ROOT / "tienkung2_lite" / "urdf" / "tiangong2_Lite.urdf",
 }
 
 IK_CONFIG_DICT = {
@@ -44,23 +53,30 @@ IK_CONFIG_DICT = {
         "booster_k1": IK_CONFIG_ROOT / "smplx_to_k1.json",
         "pnd_adam_lite": IK_CONFIG_ROOT / "smplx_to_adam.json",
         "tienkung": IK_CONFIG_ROOT / "smplx_to_tienkung.json",
-        "fourier_gr3": IK_CONFIG_ROOT / "smplx_to_gr3.json",
     },
-    "bvh_lafan1":{
-        "unitree_g1": IK_CONFIG_ROOT / "bvh_lafan1_to_g1.json",
-        "unitree_g1_with_hands": IK_CONFIG_ROOT / "bvh_lafan1_to_g1.json",
-        "booster_t1_29dof": IK_CONFIG_ROOT / "bvh_lafan1_to_t1_29dof.json",
-        "fourier_n1": IK_CONFIG_ROOT / "bvh_lafan1_to_n1.json",
-        "stanford_toddy": IK_CONFIG_ROOT / "bvh_lafan1_to_toddy.json",
-        "engineai_pm01": IK_CONFIG_ROOT / "bvh_lafan1_to_pm01.json",
-        "pal_talos": IK_CONFIG_ROOT / "bvh_to_talos.json",
-    },
-    "bvh_nokov":{
-        "unitree_g1": IK_CONFIG_ROOT / "bvh_nokov_to_g1.json",
-    },
-    "bvh_xsens":{
-        "unitree_g1": IK_CONFIG_ROOT / "bvh_xsens_to_g1.json",
-        "unitree_h1_2": IK_CONFIG_ROOT / "bvh_xsens_to_h1_2.json",
+    "bvh":{
+        "unitree_g1": IK_CONFIG_ROOT / "bvh_to_g1.json",
+        "unitree_g1_with_hands": IK_CONFIG_ROOT / "bvh_to_g1.json",
+        "booster_t1_29dof": IK_CONFIG_ROOT / "bvh_to_t1_29dof.json",
+        "fourier_n1": IK_CONFIG_ROOT / "bvh_to_n1.json",
+        "stanford_toddy": IK_CONFIG_ROOT / "bvh_to_toddy.json",
+        "engineai_pm01": IK_CONFIG_ROOT / "bvh_to_pm01.json",
+        "dex0902": IK_CONFIG_ROOT / "bvh_to_dex_v1.json",
+        "dex_evt_noitom": IK_CONFIG_ROOT / "bvh_noitom_to_dex_evt.json",
+        "dex_evt_xsens": IK_CONFIG_ROOT / "bvh_xsens_to_dex_evt.json",
+        "dex_evt_lafan": IK_CONFIG_ROOT / "bvh_lafan_to_dex_evt.json",
+        
+        "tienkung2_noitom": IK_CONFIG_ROOT / "bvh_noitom_to_tienkung.json",
+        "tienkung2_xsens": IK_CONFIG_ROOT / "bvh_xsens_to_tienkung.json",
+        "tienkung2_lafan": IK_CONFIG_ROOT / "bvh_lafan_to_tienkung.json",
+
+        "tienkung2_lite_noitom": IK_CONFIG_ROOT / "bvh_noitom_to_tienkung_lite.json",
+        "tienkung2_lite_xsens": IK_CONFIG_ROOT / "bvh_xsens_to_tienkung_lite.json",
+
+        "tienkung2_plus_noitom": IK_CONFIG_ROOT / "bvh_noitom_to_tienkung_plus.json",
+        "tienkung2_plus_xsens": IK_CONFIG_ROOT / "bvh_xsens_to_tienkung_plus.json",
+        "tienkung2_plus_lafan": IK_CONFIG_ROOT / "bvh_lafan_to_tienkung_plus.json",
+
     },
     "fbx":{
         "unitree_g1": IK_CONFIG_ROOT / "fbx_to_g1.json",
@@ -68,13 +84,6 @@ IK_CONFIG_DICT = {
     },
     "fbx_offline":{
         "unitree_g1": IK_CONFIG_ROOT / "fbx_offline_to_g1.json",
-    },
-    
-    "xrobot":{
-        "unitree_g1": IK_CONFIG_ROOT / "xrobot_to_g1.json",
-    },
-    "xsens_mvn": {
-        "unitree_g1": IK_CONFIG_ROOT / "xsens_mvn_to_g1.json",
     },
 }
 
@@ -95,9 +104,10 @@ ROBOT_BASE_DICT = {
     "berkeley_humanoid_lite": "imu_2",
     "booster_k1": "Trunk",
     "pnd_adam_lite": "pelvis",
-    "tienkung": "Base_link",
-    "pal_talos": "base_link",
-    "fourier_gr3": "base_link",
+    "tienkung2": "pelvis",
+    "dex0902": "base_link",
+    "dex_v3": "pelvis",
+    "dex_evt": "pelvis",
 }
 
 VIEWER_CAM_DISTANCE_DICT = {
@@ -116,7 +126,8 @@ VIEWER_CAM_DISTANCE_DICT = {
     "berkeley_humanoid_lite": 2.0,
     "booster_k1": 2.0,
     "pnd_adam_lite": 3.0,
-    "tienkung": 3.0,
-    "pal_talos": 3.0,
-    "fourier_gr3": 2.0,
+    "tienkung2": 3.0,
+    "dex0902": 3.0,
+    "dex_v3" : 3.0,
+    "dex_evt": 3.0,
 }

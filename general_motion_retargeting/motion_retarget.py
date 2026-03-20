@@ -1,12 +1,18 @@
-
+from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
+from scipy import sparse as sp  # type: ignore[import-untyped]
+import cvxpy as cp  # type: ignore[import-not-found]
+import viser  # type: ignore[import-not-found]
+import yourdfpy  # type: ignore[import-untyped]
+from viser.extras import ViserUrdf  # type: ignore[import-not-found]
 import mink
 import mujoco as mj
 import numpy as np
 import json
+import time
 from scipy.spatial.transform import Rotation as R
-from .params import ROBOT_XML_DICT, IK_CONFIG_DICT
+from .params import ROBOT_XML_DICT, ROBOT_URDF_DICT, IK_CONFIG_DICT
 from rich import print
-
+from general_motion_retargeting.geom_distance_limit import GeomDistanceLimit, FootGroundContactLimit
 class GeneralMotionRetargeting:
     """General Motion Retargeting (GMR).
     """
@@ -14,15 +20,29 @@ class GeneralMotionRetargeting:
         self,
         src_human: str,
         tgt_robot: str,
+        format: str="",
         actual_human_height: float = None,
         solver: str="daqp", # change from "quadprog" to "daqp".
         damping: float=5e-1, # change from 1e-1 to 1e-2.
         verbose: bool=True,
         use_velocity_limit: bool=False,
+        use_collision_avoidance: bool=False,
     ) -> None:
-
+        self.ground_offset = None
+        self.horizon_offset = 0.02
+        self.lowest_pos = np.inf
         # load the robot model
-        self.xml_file = str(ROBOT_XML_DICT[tgt_robot])
+        if "dex_evt2" in tgt_robot:
+            self.xml_file = str(ROBOT_XML_DICT["dex_evt2"])
+            self.model_path = str(ROBOT_URDF_DICT["dex_evt2"])
+        elif "dex_evt" in tgt_robot:
+            self.xml_file = str(ROBOT_XML_DICT["dex_evt"])
+            self.model_path = str(ROBOT_URDF_DICT["dex_evt"])
+        else:
+            self.xml_file = str(ROBOT_XML_DICT[tgt_robot])
+            self.model_path = str(ROBOT_URDF_DICT[tgt_robot])
+        self.collision_detection_threshold = 0.1
+        
         if verbose:
             print("Use robot model: ", self.xml_file)
         self.model = mj.MjModel.from_xml_path(self.xml_file)
@@ -54,21 +74,25 @@ class GeneralMotionRetargeting:
                 print(f"Motor ID {i}: {motor_name}")
 
         # Load the IK config
-        with open(IK_CONFIG_DICT[src_human][tgt_robot]) as f:
+        if "dex_evt2" in tgt_robot:
+            config_path = IK_CONFIG_DICT[src_human]["dex_evt_" + format]
+        else:
+            config_path = IK_CONFIG_DICT[src_human][tgt_robot + "_" + format]
+        
+
+        with open(config_path) as f:
             ik_config = json.load(f)
         if verbose:
-            print("Use IK config: ", IK_CONFIG_DICT[src_human][tgt_robot])
+            print("Use IK config: ", config_path)
         
-        # compute the scale ratio based on given human height and the assumption in the IK config
         if actual_human_height is not None:
             ratio = actual_human_height / ik_config["human_height_assumption"]
         else:
             ratio = 1.0
-            
-        # adjust the human scale table
+
+         # adjust the human scale table
         for key in ik_config["human_scale_table"].keys():
             ik_config["human_scale_table"][key] = ik_config["human_scale_table"][key] * ratio
-    
 
         # used for retargeting
         self.ik_match_table1 = ik_config["ik_match_table1"]
@@ -97,21 +121,206 @@ class GeneralMotionRetargeting:
 
         self.ik_limits = [mink.ConfigurationLimit(self.model)]
         if use_velocity_limit:
-            VELOCITY_LIMITS = {k: 3*np.pi for k in self.robot_motor_names.keys()}
-            self.ik_limits.append(mink.VelocityLimit(self.model, VELOCITY_LIMITS)) 
+            # Velocity limits should be applied on non-free joints, not actuators.
+            # Velocity limits should be applied on non-free joints, not actuators.
+            free_joints = set(
+                mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_JOINT, j)
+                for j in range(self.model.njnt)
+                if self.model.jnt_type[j] == mj.mjtJoint.mjJNT_FREE
+            )
+            # Only constrain joints explicitly listed in config.
+            velocity_limits = {}
+            config_velocity_limits = ik_config.get("robot_velocity_limits", {})
+            for joint_name, limit in config_velocity_limits.items():
+                # Allow both joint names and motor (actuator) names in config.
+                if joint_name in self.robot_dof_names:
+                    if joint_name in free_joints:
+                        print(f"[GMR][warn] skip velocity limit on free joint '{joint_name}'")
+                        continue
+                    velocity_limits[joint_name] = limit
+                elif joint_name in self.robot_motor_names:
+                    motor_id = self.robot_motor_names[joint_name]
+                    # actuator_trnid gives (joint id, type); use joint id to find the driven joint.
+                    driven_joint_id = self.model.actuator_trnid[motor_id, 0]
+                    driven_joint_name = mj.mj_id2name(
+                        self.model, mj.mjtObj.mjOBJ_JOINT, driven_joint_id
+                    )
+                    if driven_joint_name in free_joints:
+                        print(f"[GMR][warn] skip velocity limit on free joint driven by motor '{joint_name}'")
+                        continue
+                    velocity_limits[driven_joint_name] = limit
+                else:
+                    print(f"[GMR][warn] skipping velocity limit for unsupported or unknown joint/motor '{joint_name}'")
+            if velocity_limits:
+                self.ik_limits.append(mink.VelocityLimit(self.model, velocity_limits))
+            else:
+                print("[GMR][warn] no velocity limits applied (config empty or all skipped)")
+
+        ground_geom = None
+        for candidate in ("ground", "floor"):
+            if mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, candidate) >= 0:
+                ground_geom = candidate
+                break
+        foot_geoms = [
+            "wrist_pitch_l_link_collision",
+            "wrist_pitch_r_link_collision",
+            "wrist_roll_l_link_collision",
+            "wrist_roll_r_link_collision"
+            "pelvis_collision",
+            "knee_pitch_l_link_collision",
+            "knee_pitch_r_link_collision",
+        ]
+        foot_geoms = [
+            name
+            for name in foot_geoms
+            if mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, name) >= 0
+        ]
+        if ground_geom and foot_geoms:
+            self.foot_ground_limit = FootGroundContactLimit(
+                model=self.model,
+                foot_geom_names=foot_geoms,
+                min_height=0.025,
+                margin=0.01,
+            )
+            self.ik_limits.append(self.foot_ground_limit)
+            
+            if verbose:
+                print(
+                    f"[GMR] foot-ground collision avoidance enabled: {foot_geoms} vs {ground_geom}"
+                )
+        elif verbose:
+            print(
+                "[GMR][warn] foot-ground collision avoidance skipped (missing ground or foot geoms)"
+            )
+        
+        foot_geoms = [
+            "toe1_left",
+            "toe1_right",
+            "toe2_left",
+            "toe2_right",
+            "toe_r_link_collision",
+            "toe_l_link_collision",
+            "foot_end_l_link_collision",
+            "foot_end_r_link_collision",
+            "hip_yaw_l_link_collision",
+            "hip_yaw_r_link_collision"
+            "ankle_roll_l_link_collision",
+            "ankle_roll_r_link_collision",
+            "left_tcp_link_collision",
+            "right_tcp_link_collision",
+        ]
+        foot_geoms = [
+            name
+            for name in foot_geoms
+            if mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, name) >= 0
+        ]
+        if ground_geom and foot_geoms:
+            self.foot_ground_limit = FootGroundContactLimit(
+                model=self.model,
+                foot_geom_names=foot_geoms,
+                min_height=self.horizon_offset,
+            )
+            print(f"Foot ground limit created with foot geoms: {foot_geoms}")
+            self.ik_limits.append(self.foot_ground_limit)
+                
+        self.last_cost = np.inf
+
+        if use_collision_avoidance:
+            self.col_limit1 = GeomDistanceLimit(
+                model=self.model,
+                geom_pairs=[
+                        (["head_yaw_link_collision", "wrist_pitch_l_link_collision"]),
+                        (["head_yaw_link_collision", "wrist_pitch_r_link_collision"]),
+                        (["head_pitch_link_collision", "wrist_pitch_l_link_collision"]),
+                        (["head_pitch_link_collision", "wrist_pitch_r_link_collision"]),
+                        (["wrist_roll_l_link_collision"], ["hip_roll_l_link_collision"]),
+                        (["wrist_roll_l_link_collision"], ["shoulder_yaw_l_link_collision"]),
+                        (["wrist_roll_r_link_collision"], ["hip_roll_r_link_collision"]),  
+                        (["wrist_roll_r_link_collision"], ["shoulder_roll_r_link_collision"]),
+                        (["wrist_roll_r_link_collision"], ["wrist_roll_l_link_collision"]),
+                        (["hip_yaw_l_link_collision", "left_tcp_link_collision"]),
+                        (["hip_yaw_r_link_collision", "right_tcp_link_collision"]),
+                        (["hip_roll_l_link_collision", "left_tcp_link_collision"]),
+                        (["hip_roll_r_link_collision", "right_tcp_link_collision"]),
+                        (["elbow_pitch_r_link_collision", "left_tcp_link_collision"]),
+                        (["wrist_roll_r_link_collision", "left_tcp_link_collision"]),
+                        (["elbow_pitch_l_link_collision", "right_tcp_link_collision"]),
+                        (["wrist_roll_l_link_collision", "right_tcp_link_collision"]),
+                        (["left_tcp_link_collision", "right_tcp_link_collision"]),
+                        (["knee_pitch_l_link_collision", "left_tcp_link_collision"]),
+                        (["knee_pitch_r_link_collision", "right_tcp_link_collision"]),
+                        (["hip_yaw_l_link_collision", "wrist_pitch_l_link_collision"]),
+                        (["hip_yaw_r_link_collision", "wrist_pitch_r_link_collision"]),
+                        (["hip_roll_l_link_collision", "wrist_pitch_l_link_collision"]),
+                        (["hip_roll_r_link_collision", "wrist_pitch_r_link_collision"]),
+                        (["hip_yaw_l_link_collision", "wrist_roll_l_link_collision"]),
+                        (["hip_yaw_r_link_collision", "wrist_roll_r_link_collision"]),
+                        (["hip_roll_l_link_collision", "wrist_roll_l_link_collision"]),
+                        (["hip_roll_r_link_collision", "wrist_roll_r_link_collision"]),
+                        (["hip_yaw_l_link_collision", "elbow_pitch_l_link_collision"]),
+                        (["hip_yaw_r_link_collision", "elbow_pitch_r_link_collision"]),
+                        (["hip_roll_l_link_collision", "elbow_pitch_l_link_collision"]),
+                        (["hip_roll_r_link_collision", "elbow_pitch_r_link_collision"]),
+                        (["hip_yaw_l_link_collision", "elbow_yaw_l_link_collision"]),
+                        (["hip_yaw_r_link_collision", "elbow_yaw_r_link_collision"]),
+                        (["hip_roll_l_link_collision", "elbow_yaw_l_link_collision"]),
+                        (["hip_roll_r_link_collision", "elbow_yaw_r_link_collision"]),
+                        (["wrist_roll_l_link_collision"], ["knee_pitch_l_link_collision"]),
+                        (["wrist_roll_r_link_collision"], ["knee_pitch_r_link_collision"]),
+                        (["elbow_pitch_l_link_collision"], ["knee_pitch_l_link_collision"]),
+                        (["elbow_pitch_r_link_collision"], ["knee_pitch_r_link_collision"]),
+                        ],
+                gain=1e-3,
+                minimum_distance_from_collisions=0.015,      
+                collision_detection_distance=0.035,         
+            )
+            self.ik_limits.append(self.col_limit1)
+            print("col_limit1 has been started")
+            self.col_limit2 = GeomDistanceLimit(
+                model=self.model,
+                geom_pairs=[
+                        (["wrist_roll_l_link_collision"], ["pelvis_collision"]),
+                        (["wrist_roll_r_link_collision"], ["pelvis_collision"]),
+                        (["left_tcp_link_collision"], ["pelvis_collision"]),
+                        (["right_tcp_link_collision"], ["pelvis_collision"]),
+                        (["hip_yaw_r_link_collision"], ["hip_yaw_l_link_collision"]),
+                        (["knee_pitch_l_link_collision"], ["knee_pitch_r_link_collision"]),
+                        (["knee_pitch_l_link_collision"], ["hip_yaw_r_link_collision"]),
+                        (["knee_pitch_r_link_collision"], ["hip_yaw_l_link_collision"]),
+                        
+                        (["elbow_pitch_r_link_collision", "elbow_pitch_l_link_collision"]),
+                        (["wrist_roll_r_link_collision", "elbow_pitch_l_link_collision"]),
+                        (["elbow_pitch_r_link_collision", "elbow_yaw_l_link_collision"]),
+                        (["wrist_roll_r_link_collision", "elbow_yaw_l_link_collision"]),
+
+                        (["elbow_pitch_l_link_collision", "elbow_pitch_r_link_collision"]),
+                        (["wrist_roll_l_link_collision", "elbow_pitch_r_link_collision"]),
+                        (["elbow_pitch_l_link_collision", "elbow_yaw_r_link_collision"]),
+                        (["wrist_roll_l_link_collision", "elbow_yaw_r_link_collision"]),
+                        ],
+                gain=1e-3,
+                minimum_distance_from_collisions=0.005,      
+                collision_detection_distance=0.025,         
+                bound_relaxation=0,
+            )
+            self.ik_limits.append(self.col_limit2)
             
         self.setup_retarget_configuration()
-        
-        self.ground_offset = 0.0
+
+        self.toe_id = [mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "toe_l_link"), mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "toe_r_link"), mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "pelvis")]
+
 
     def setup_retarget_configuration(self):
         self.configuration = mink.Configuration(self.model)
-    
+    # 任务2重点是腿，任务1是上半身
         self.tasks1 = []
         self.tasks2 = []
         
         for frame_name, entry in self.ik_match_table1.items():
+            # import ipdb; ipdb.set_trace()
+            # breakpoint()
             body_name, pos_weight, rot_weight, pos_offset, rot_offset = entry
+            # print(f"body_name is {body_name} , pos_weight is {pos_weight} , rot_weight is {rot_weight} , pos_offset is {pos_offset} , rot_offset is {rot_offset}")
             if pos_weight != 0 or rot_weight != 0:
                 task = mink.FrameTask(
                     frame_name=frame_name,
@@ -127,9 +336,10 @@ class GeneralMotionRetargeting:
                 )
                 self.tasks1.append(task)
                 self.task_errors1[task] = []
-        
+
         for frame_name, entry in self.ik_match_table2.items():
             body_name, pos_weight, rot_weight, pos_offset, rot_offset = entry
+            # print(f"body_name is {body_name} , pos_weight is {pos_weight} , rot_weight is {rot_weight} , pos_offset is {pos_offset} , rot_offset is {rot_offset}")
             if pos_weight != 0 or rot_weight != 0:
                 task = mink.FrameTask(
                     frame_name=frame_name,
@@ -145,18 +355,17 @@ class GeneralMotionRetargeting:
                 )
                 self.tasks2.append(task)
                 self.task_errors2[task] = []
-
   
     def update_targets(self, human_data, offset_to_ground=False):
         # scale human data in local frame
         human_data = self.to_numpy(human_data)
         human_data = self.scale_human_data(human_data, self.human_root_name, self.human_scale_table)
         human_data = self.offset_human_data(human_data, self.pos_offsets1, self.rot_offsets1)
-        human_data = self.apply_ground_offset(human_data)
-        if offset_to_ground:
-            human_data = self.offset_human_data_to_ground(human_data)
-        self.scaled_human_data = human_data
 
+        human_data = self.apply_ground_offset(human_data)
+        
+        self.scaled_human_data = human_data
+    
         if self.use_ik_match_table1:
             for body_name in self.human_body_to_task1.keys():
                 task = self.human_body_to_task1[body_name]
@@ -168,9 +377,37 @@ class GeneralMotionRetargeting:
                 task = self.human_body_to_task2[body_name]
                 pos, rot = human_data[body_name]
                 task.set_target(mink.SE3.from_rotation_and_translation(mink.SO3(rot), pos))
-            
-            
-    def retarget(self, human_data, offset_to_ground=False):
+    
+    def _prefilter_pairs_with_mj_collision(self, threshold: float):
+        m, d = self.model, self.data
+        ngeom = m.ngeom
+
+        self._geom_names = [mj.mj_id2name(m, mj.mjtObj.mjOBJ_GEOM, g) or "" for g in range(ngeom)]
+
+        if not hasattr(self, "_saved_margins"):
+            self._saved_margins = np.empty_like(m.geom_margin)
+        self._saved_margins[:] = m.geom_margin
+
+        m.geom_margin[:] = threshold
+
+        # Run collision. This runs broad→narrow and fills d.contact.
+        mj.mj_collision(m, d)
+
+        # Collect unique candidate pairs that involve at least one masked geom
+        candidates = set()
+        for k in range(d.ncon):
+            c = d.contact[k]
+            g1, g2 = int(c.geom1), int(c.geom2)
+            if g1 < 0 or g2 < 0:
+                continue
+            candidates.add((min(g1, g2), max(g1, g2)))
+
+        # Restore margins to keep physics untouched
+        m.geom_margin[:] = self._saved_margins
+
+        return candidates
+
+    def retarget(self, human_data, offset_to_ground=False, target_laplacian=None, adj_list=None, object_points_local=None, w_nominal_tracking=5.0, q_nominal_list=None, i=0, t=0):
         # Update the task targets
         self.update_targets(human_data, offset_to_ground)
 
@@ -214,24 +451,33 @@ class GeneralMotionRetargeting:
                 
                 next_error = self.error2()
                 num_iter += 1
-                
             
         return self.configuration.data.qpos.copy()
 
 
     def error1(self):
-        return np.linalg.norm(
-            np.concatenate(
-                [task.compute_error(self.configuration) for task in self.tasks1]
-            )
-        )
+        all_errors = []
+        for task in self.tasks1:
+            err = task.compute_error(self.configuration)
+            # 如果这个 task 是 GroundAvoidanceTask，就打印
+            # if isinstance(task, GroundAvoidanceTask):
+            #     print(f"[Ground Task] {task.body_name} error: {err}")
+            all_errors.append(err)
+        
+        all_errors = np.concatenate(all_errors)
+        return np.linalg.norm(all_errors)
     
     def error2(self):
-        return np.linalg.norm(
-            np.concatenate(
-                [task.compute_error(self.configuration) for task in self.tasks2]
-            )
-        )
+        all_errors = []
+        for task in self.tasks2:
+            err = task.compute_error(self.configuration)
+            # 如果这个 task 是 GroundAvoidanceTask，就打印
+            # if isinstance(task, GroundAvoidanceTask):
+            #     print(f"[Ground Task] {task.body_name} error: {err}")
+            all_errors.append(err)
+        
+        all_errors = np.concatenate(all_errors)
+        return np.linalg.norm(all_errors)
 
 
     def to_numpy(self, human_data):
@@ -244,7 +490,6 @@ class GeneralMotionRetargeting:
         
         human_data_local = {}
         root_pos, root_quat = human_data[human_root_name]
-        
         # scale root
         scaled_root_pos = human_scale_table[human_root_name] * root_pos
         
@@ -282,32 +527,39 @@ class GeneralMotionRetargeting:
             offset_human_data[body_name][0] = pos + global_pos_offset
            
         return offset_human_data
-            
-    def offset_human_data_to_ground(self, human_data):
-        """find the lowest point of the human data and offset the human data to the ground"""
-        offset_human_data = {}
-        ground_offset = 0.1
-        lowest_pos = np.inf
-
-        for body_name in human_data.keys():
-            # only consider the foot/Foot
-            if "Foot" not in body_name and "foot" not in body_name:
-                continue
-            pos, quat = human_data[body_name]
-            if pos[2] < lowest_pos:
-                lowest_pos = pos[2]
-                lowest_body_name = body_name
-        for body_name in human_data.keys():
-            pos, quat = human_data[body_name]
-            offset_human_data[body_name] = [pos, quat]
-            offset_human_data[body_name][0] = pos - np.array([0, 0, lowest_pos]) + np.array([0, 0, ground_offset])
-        return offset_human_data
+    
+    
 
     def set_ground_offset(self, ground_offset):
         self.ground_offset = ground_offset
 
     def apply_ground_offset(self, human_data):
+        toe_rela_pos = min([float(self.configuration.data.xpos[self.toe_id[0]][2]), float(self.configuration.data.xpos[self.toe_id[1]][2])])
+        cur_lowest_pos = np.inf
+        lowest_body_name = ""
+            
+        for body_name, (pos, quat) in human_data.items():
+            if pos[2] < cur_lowest_pos:
+                cur_lowest_pos = pos[2]
+                lowest_body_name = body_name
+
+        if "Foot" in lowest_body_name or "Toe" in lowest_body_name:
+            if toe_rela_pos < 0:
+                cur_lowest_pos += toe_rela_pos
+
+        if self.ground_offset is None:
+            self.cur_lowest_pos = cur_lowest_pos
+            self.ground_offset =  cur_lowest_pos - self.horizon_offset
+        elif "Wrist" in lowest_body_name or "Hand" in lowest_body_name:
+            ground_offset =  cur_lowest_pos - self.horizon_offset
+
+        if cur_lowest_pos - self.horizon_offset < self.ground_offset:
+            ground_offset =  cur_lowest_pos - self.horizon_offset
+        else:
+            ground_offset = self.ground_offset
+
         for body_name in human_data.keys():
             pos, quat = human_data[body_name]
-            human_data[body_name][0] = pos - np.array([0, 0, self.ground_offset])
+            human_data[body_name][0] = pos - np.array([0, 0, ground_offset])        
+
         return human_data
