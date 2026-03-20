@@ -52,16 +52,22 @@ class RobotMotionViewer:
                 record_video=False,
                 video_path=None,
                 video_width=640,
-                video_height=480,
-                keyboard_callback=None,
-                ):
+                video_height=480):
         
         self.robot_type = robot_type
         self.xml_path = ROBOT_XML_DICT[robot_type]
         self.model = mj.MjModel.from_xml_path(str(self.xml_path))
         self.data = mj.MjData(self.model)
-        self.robot_base = ROBOT_BASE_DICT[robot_type]
-        self.viewer_cam_distance = VIEWER_CAM_DISTANCE_DICT[robot_type]
+        if "dex_evt" in robot_type:
+            self.robot_base = ROBOT_BASE_DICT["dex_evt"]
+            self.viewer_cam_distance = VIEWER_CAM_DISTANCE_DICT["dex_evt"]
+        elif "tienkung2" in robot_type:
+            self.robot_base = ROBOT_BASE_DICT["tienkung2"]
+            self.viewer_cam_distance = VIEWER_CAM_DISTANCE_DICT["tienkung2"]
+        else:
+            self.robot_base = ROBOT_BASE_DICT[robot_type]
+            self.viewer_cam_distance = VIEWER_CAM_DISTANCE_DICT[robot_type]
+
         mj.mj_step(self.model, self.data)
         
         self.motion_fps = motion_fps
@@ -74,9 +80,7 @@ class RobotMotionViewer:
             model=self.model,
             data=self.data,
             show_left_ui=False,
-            show_right_ui=False, 
-            key_callback=keyboard_callback
-            )      
+            show_right_ui=False)      
 
         self.viewer.opt.flags[mj.mjtVisFlag.mjVIS_TRANSPARENT] = transparent_robot
         
@@ -93,6 +97,51 @@ class RobotMotionViewer:
             # Initialize renderer for video recording
             self.renderer = mj.Renderer(self.model, height=video_height, width=video_width)
         
+        self.end_site_names = {
+            "left_hand_end": ["wrist_roll_l_link"],   # 左手 body, sid, bodyid
+            "right_hand_end": ["wrist_roll_r_link"],  # 右手
+            "left_foot_end": ["ankle_roll_l_link"],   # 左脚
+            "right_foot_end": ["ankle_roll_r_link"]   # 右脚
+        }
+        body_name = ["wrist_roll_l_link", 
+                     "wrist_roll_r_link",
+                     "ankle_roll_l_link",
+                     "ankle_roll_r_link"]
+        # 缓存site id（找不到则用 -1 占位）
+        self.end_site_ids = []
+        for key, value in self.end_site_names.items():
+            try:
+                sid = self.model.site(key).id
+            except Exception:
+                sid = -1
+            self.end_site_names[key].append(sid)
+            try:
+                self.end_site_names[key].append(self.model.body(value[0]).id)
+            except Exception:
+                self.end_site_names[key].append(-1)
+        self.pre_dof_pos = None
+        
+    def get_info(self):
+        end_pos = []
+        poss_world = []
+        end_site_ids = []
+        for name, info in self.end_site_names.items():
+            if info[1] == -1:
+                continue
+            pos_world = (self.data.site_xpos[info[1]])              # 全局坐标=
+            # world -> root-local
+            root_id = self.model.body("pelvis").id
+            pos_world = np.array(self.data.site_xpos[info[1]])
+            root_pos = np.array(self.data.xpos[root_id])
+            root_xmat = np.array(self.data.xmat[root_id]).reshape(3,3)
+            pos_local = root_xmat.T.dot(pos_world - root_pos)
+            poss_world.append(pos_world)
+            end_pos.append(pos_local.tolist())
+        
+        self.poss_world = poss_world
+        self.end_pos = end_pos
+        return np.array(end_pos)
+    
     def step(self, 
             # robot data
             root_pos, root_rot, dof_pos, 
@@ -126,7 +175,7 @@ class RobotMotionViewer:
         if follow_camera:
             self.viewer.cam.lookat = self.data.xpos[self.model.body(self.robot_base).id]
             self.viewer.cam.distance = self.viewer_cam_distance
-            self.viewer.cam.elevation = -10  # 正面视角，轻微向下看
+            # self.viewer.cam.elevation = -10  # 正面视角，轻微向下看
             # self.viewer.cam.azimuth = 180    # 正面朝向机器人
         
         if human_motion_data is not None:
