@@ -27,6 +27,9 @@ setup(
     "protobuf",
     "redis[hiredis]",
     "imageio[ffmpeg]",
+    "yourdfpy",
+    "viser",
+    "cvxpy"
   ],
   python_requires='>=3.10',
 )
