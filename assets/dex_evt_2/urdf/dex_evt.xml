@@ -146,7 +146,6 @@
                   <geom name="foot_end_l_link_collision" pos="-0.1 0 -0.035" quat="1.0 0.0 0.0 0.0" type="cylinder" size="0.01 0.01" rgba="0.0 0.0 0.752941 1" class="collision" />
                   
                   <body name="toe_l_link" pos="0.175 0 -0.033">
-                    <joint name="toe_l_joint" type="hinge"/>
                     <geom name="toe_l_link_collision" pos="0.0 0 -0.0" quat="1.0 0.0 0.0 0.0" type="cylinder" size="0.01 0.01" rgba="0.0 0.0 0.752941 1" class="collision" />
                   </body>
                   <site 
@@ -194,7 +193,6 @@
                   <geom name="foot_end_r_link_collision" pos="-0.1 0 -0.035" quat="1.0 0.0 0.0 0.0" type="cylinder" size="0.01 0.01" rgba="0.0 0.0 0.752941 1" class="collision" />
                   <body name="toe_r_link" pos="0.175 0 -0.033">
                     <geom name="toe_r_link_collision" pos="0.0 0 -0.0" quat="1.0 0.0 0.0 0.0" type="cylinder" size="0.01 0.01" rgba="0.0 0.0 0.752941 1" class="collision" />
-                    <joint name="toe_r_joint" type="hinge"/>
                   </body>
                   <site 
                     name="right_foot_end"
